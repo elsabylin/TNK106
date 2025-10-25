@@ -46,6 +46,7 @@ try
         % find matching APs and calculate a distance in RSS-space between
         % test and training
         if ~isempty(matchingAPs)
+        % calculating distance using Euclidean distance
             d = sqrt(sum(((test.rssi(idTest) + RSS_offset) - (training_AP.rssi(idTrain) + RSS_offset)).^2));
         end
 
