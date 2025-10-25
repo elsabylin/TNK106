@@ -1,0 +1,67 @@
+clear all;
+clc;
+
+% Setting database parameters.
+host = 'localhost';
+port = 5432;            % Chose correct port from PuTTY
+database = 'courses';
+username = 'tnk106';
+password ='tnk1062020';
+
+% Connecting to the database.
+conn = postgresql(username, password, ...
+    'Server',host,'PortNumber',port, ...
+    'DatabaseName',database);
+
+try    
+    % getting training data
+    sql_training = "SELECT * FROM tnk106.handin_ex_2 WHERE fp_id IN ('1','3','4','5') AND name = 'LiU'";
+    disp(sql_training)
+    training = conn.fetch(sql_training);
+    
+    % how many training/fingerprint ids there are
+    training_ids = unique(training.fp_id);
+    
+    % getting test data
+    sql_test = "SELECT * FROM tnk106.handin_ex_2 WHERE fp_id = '2' AND name = 'LiU'";
+    disp(sql_test)
+    test = conn.fetch(sql_test);
+    
+    % intiating some variables
+    RSS_offset = 120;
+    estimated_fingerprint = 0;
+    dist = inf;
+    
+    % unlike lab2 we do not need to loop for all test data since it is only
+    % one number (2)
+    for i = 1:height(training_ids) % all fingerprints (training data)
+        fID = training_ids(i);
+
+        % fpk
+        training_AP = training(training.fp_id == fID, :);
+
+        % check if mac address matches
+        [matchingAPs, idTest, idTrain] = intersect(test.mac, training_AP.mac);
+
+        % find matching APs and calculate a distance in RSS-space between
+        % test and training
+        if ~isempty(matchingAPs)
+            d = sqrt(sum(((test.rssi(idTest) + RSS_offset) - (training_AP.rssi(idTrain)) + RSS_offset ).^2));
+        end
+
+        % if the distance is smaller than the current one -> save it
+        if d < dist
+            dist = d;
+            estimated_fingerprint = fID;
+        end
+    end
+
+catch error
+    fprintf('%s: %s\n',error.identifier,error.message)
+end
+
+disp(estimated_fingerprint)
+
+fprintf('\nClosing the connection.\n')
+conn.close;
+
