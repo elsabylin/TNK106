@@ -46,7 +46,7 @@ try
         % find matching APs and calculate a distance in RSS-space between
         % test and training
         if ~isempty(matchingAPs)
-            d = sqrt(sum(((test.rssi(idTest) + RSS_offset) - (training_AP.rssi(idTrain)) + RSS_offset ).^2));
+            d = sqrt(sum(((test.rssi(idTest) + RSS_offset) - (training_AP.rssi(idTrain) + RSS_offset)).^2));
         end
 
         % if the distance is smaller than the current one -> save it
@@ -60,6 +60,7 @@ catch error
     fprintf('%s: %s\n',error.identifier,error.message)
 end
 
+disp("Fingerprint that corresponds best to measurment:")
 disp(estimated_fingerprint)
 
 fprintf('\nClosing the connection.\n')
