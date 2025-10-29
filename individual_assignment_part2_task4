@@ -1,0 +1,265 @@
+clear all;
+close all;
+clc;
+
+%% Setting parameters
+group = 'elsby116';
+
+%% Creating database connection
+
+% Setting connection parameters.
+host = 'localhost';
+port = 5432;
+database = 'courses';
+username = 'tnk106';
+password ='tnk1062020';
+gridsize = 'handin_ex_3_grid_50';
+
+% Connecting to the database.
+conn = postgresql(username, password, ...
+                 'Server',host,'PortNumber',port, ...
+                 'DatabaseName',database);
+
+%% Fetching data and performing calculations.
+try
+    %% main cell data
+    sql = ['SELECT g.id,cell_id, '...
+        'avg(c.rss::double precision) AS avg_rss,'...
+        'stddev(c.rss::double precision) AS rss_stdev,'...
+        'count(*) AS count,'...
+        'g.geom '...
+        'FROM tnk106.handin_ex_3_training c '...
+        'JOIN ' gridsize ' g ON st_within(c.geom, g.geom) '...
+        'GROUP BY g.id, g.geom, cell_id'];
+    disp(sql)
+    data = conn.fetch(sql); % training main cells data
+
+    %% neighbour cell data
+    sql2 = ['SELECT g.id,n_cell_id, '...
+        'avg(c.n_rss::double precision) AS avg_rss,'...
+        'stddev(c.n_rss::double precision) AS rss_stdev,'...
+        'count(*) AS count,'...
+        'g.geom '...
+        'FROM tnk106.handin_ex_3_training c '...
+        'JOIN ' gridsize ' g ON st_within(c.geom, g.geom) '...
+        'GROUP BY g.id, g.geom, n_cell_id'];
+    disp(sql2)
+    data2 = conn.fetch(sql2); % training neighbour cells data
+
+    %% get measurement data
+    sql3 = "SELECT * from tnk106.handin_ex_3_test";
+    disp(sql3)
+    data3 = conn.fetch(sql3);
+
+    %% get number of grids
+    sql4 = ['SELECT max(id) FROM ' gridsize];
+    disp(sql4)
+    data4 = conn.fetch(sql4);
+    
+    %% calculations
+    grid_ids = unique(data.id); % get all grids and their data
+    meas_ids = unique(data3.id_observation); % get all measurments and their data
+
+    % create a matrix with all grids (not only unique)
+    distances = NaN(length(meas_ids),data4{1,1});
+
+    % initiating some variables
+    RSS_offset = 120;
+    pred_coords = NaN(length(meas_ids), 2);
+    pen_save = [];
+
+    for i = 1:length(meas_ids)
+        % fpk
+        meas = data3(data3.id_observation == meas_ids(i),:);
+        
+        best_dist = inf; % initialize distance as infinity
+        best_grid = NaN; % initialize best grid ID
+
+        for j = 1:length(grid_ids)
+            % main and neighbouring cells needs to be compared separately
+            fp_main = data(data.id == grid_ids(j),:);
+            fp_neighbour = data2(data2.id == grid_ids(j),:);
+
+            % calculate a a distance between measurement (meas) 
+            % and fingerprint (fp_main/fp_neighbour) here
+             
+            % check if the cell id's match for main
+            match_main = intersect(meas.cell_id, fp_main.cell_id);
+            main_dist = [];
+            
+            % for all matches in main cell data
+            for k = 1:length(match_main)
+                meas_val = mean(meas.rss(meas.cell_id == match_main(k))); % calculate avg rss for measurments that are matching
+                fp_val = fp_main.avg_rss(fp_main.cell_id == match_main(k)); % gives avg fingerprint for measurment that are matching
+                
+                % euclidean distance calculation for main cells
+                main_dist(end+1) = ((meas_val+RSS_offset)-(fp_val+RSS_offset))^2;
+            end
+            
+            % do the same thing but for matching neighbouring cells
+            match_nb = intersect(meas.n_cell_id, fp_neighbour.n_cell_id);
+            nb_dist = [];
+
+            for l = 1:length(match_nb)
+                meas_nb_val = mean(meas.n_rss(meas.n_cell_id == match_nb(l)));
+                fp_nb_val = fp_neighbour.avg_rss(fp_neighbour.n_cell_id == match_nb(l));
+
+                nb_dist(end+1) = ((meas_nb_val+RSS_offset)-(fp_nb_val+RSS_offset))^2;
+            end
+            
+            % Handle non-matching neighbouring cells penalty
+            main_pen = 0;
+
+            % Handle non-matching main cells (for main cells that don't match)
+            penalty = 0;
+        
+            % Handle non-matching main cells
+            [~, ia] = setdiff(meas.cell_id, fp_main.cell_id); % gives the ids of non-matching main cells
+            if ~isempty(ia)
+                % Use mean fingerprint value as a baseline for comparison
+                avg_fp_main = mean(fp_main.avg_rss + RSS_offset);
+                unmatched_main_rss = meas.rss(ia) + RSS_offset; % gets non-matching cells rss and adds offset
+                penalty_main = sum(abs(unmatched_main_rss - avg_fp_main))^2; % equation from lecture slides
+                penalty = penalty + penalty_main;
+            end
+        
+            % Handle non-matching neighbor cells (same as for main cells)
+            [~, ib] = setdiff(meas.n_cell_id, fp_neighbour.n_cell_id);
+            if ~isempty(ib)
+                avg_fp_nb = mean(fp_neighbour.avg_rss + RSS_offset);
+                unmatched_nb_rss = meas.n_rss(ib) + RSS_offset;
+                penalty_nb = sum(abs(unmatched_nb_rss - avg_fp_nb))^2;
+                penalty = penalty + penalty_nb;
+            end
+           
+            pen_save = [pen_save, penalty];
+
+            % Calculate total distance for this grid, including penalty
+            total_distance = sqrt(sum(main_dist) + sum(nb_dist)) + penalty;
+            distances(i,grid_ids(j)) = total_distance; 
+
+            % Track the grid with the smallest distance
+            if total_distance < best_dist
+                best_dist = total_distance;
+                best_grid = grid_ids(j);  % Assign the best grid
+            end
+        end
+        fprintf('Measurement %d best matches grid %d with RSS distance %.2f \n', meas_ids(i), best_grid, best_dist);
+
+        % save coorindate in the middle of the best grid
+        sql_geom = sprintf(['SELECT ST_AsText(ST_Centroid(geom)) AS centroid FROM ' gridsize ' WHERE id= ', num2str(best_grid)]);
+        geom_data = conn.fetch(sql_geom);
+        geom_text = geom_data.centroid{1};
+    
+        coords_pred = sscanf(geom_text, 'POINT(%f %f)');
+        pred_coords(i, :) = coords_pred';
+        
+        % Get true coordinates from measurement table
+        sql6 = ['SELECT id_observation, ST_AsText(geom) AS geom_text FROM tnk106.handin_ex_3_test'];
+        geom_data = conn.fetch(sql6);
+            
+        true_coords = NaN(length(meas_ids), 2);
+            
+        % Extract coordinates for each measurement ID
+        for a = 1:length(meas_ids)
+            obs_id = meas_ids(a);
+
+            % Find matching observation
+            idx = find(geom_data.id_observation == obs_id, 1);
+            if ~isempty(idx)
+                geom_str = geom_data.geom_text{idx};
+                coords = sscanf(geom_str, 'POINT(%f %f)');
+                true_coords(a, :) = coords';
+            end
+        end
+    
+        sql5 = sprintf(['INSERT INTO tnk106.handin_estimated_location ' , ...
+                    '( id_observation, liu_id, geom ) ' , ...
+                    'VALUES (%d, ''%s'',ST_GeomFromText(''%s'',3006))'], ...
+                     meas_ids(i), group, geom_text);
+        disp(sql5)
+        %conn.execute(sql5); %uncomment this line to insert row in database
+    end
+
+    %% KALMAN FILTER
+    % extract timestamps from data3 (we only want the secounds)
+    time_extract = datetime(data3.time,'InputFormat','yyyy/MM/dd HH:mm:ss.SSS');
+    time_secounds = seconds(time_extract - time_extract(1)); % difference in secounds between measurments 
+    
+    % match the time with the correct id_observation
+    t = NaN(length(meas_ids),1);
+    for i = 1:length(meas_ids)
+        index = find(data3.id_observation == meas_ids(i),1);
+        t(i) = time_secounds(index);
+    end
+
+    % Observation matrix H
+    I = eye(2);
+    O = zeros(2,2);
+    H = [I O];
+    
+    % Choose measurement noise covariance (R) and process noise covariance (Q)
+    R = [100^2 0;
+        0 100^2]; % big R -> we do not belivie in measutrments
+    Q = [10^10 0;
+        0 10^10]; % testing small and big values of Q to tune it
+
+    % Assign initial estimates of state vector (x0) and estimation error covariance (P0)
+    x = [pred_coords(1,1);pred_coords(1,2);0;0];
+    P = 5*eye(4); % trying some values
+    x_est = zeros(4,length(t));
+    x_est(:,1) = x;
+    
+    for i = 2:length(t) 
+	%NOTE: the first estimate should be done for the second measurement in y/z, 
+	% initialize the filter with the first GPS position and a suitable speed
+
+        T = t(i) - t(i-1); % time difference between time stamps
+        F = [I T*I;
+            O I]; % motion model
+        G = [(T^2)*(I/2);
+            T*I]; % mapping between model noise and state
+    
+        % Time update: 
+        x_pred = F*x; % predicted position
+        P_pred = F*P*F' + G*Q*G'; % predicted covariance
+        
+        % Measurement update:
+        y_meas = pred_coords(i,:)';
+        K = (P_pred*H') / (H*P_pred*H'+R); % kalman gain
+        x = x_pred + K*(y_meas-H*x_pred); % estimated state
+        P = (eye(4) - K*H)*P_pred; % estimated covariance
+			
+		% Note: x is the only variable that needs to be saved for every iteration (for visualization), 
+		% the rest of the variables (T, F, G, x_pred, P_pred, K, P) can be overwritten in each iteration
+        x_est(:,i) = x;
+    end
+
+    %% Plot CDF (and KALMAN)
+    % Euclidean distance error per observation
+    errors = sqrt(sum((pred_coords - true_coords).^2, 2));
+
+    % extracting the Kalman filtered coordinates
+    filter = x_est(1:2,:)';
+    errors_kalman = sqrt(sum((filter - true_coords).^2, 2));
+
+    figure;
+    cdfplot(errors);
+    hold on;
+    cdfplot(errors_kalman);
+    xlabel('Positioning Error (meters)');
+    ylabel('Cumulative Probability');
+    title('CDF of Positioning Error using no filter and Kalman filter');
+    legend('No filter','Kalman filter','Location','best');
+    grid on;
+
+    fprintf('Mean error: %.2f meters\n', mean(errors));
+    fprintf('Median error: %.2f meters\n', median(errors));
+    fprintf('90th percentile: %.2f meters\n', prctile(errors, 90));
+
+catch error
+    fprintf('%s: %s\n',error.identifier,error.message)
+end
+
+fprintf('Closing the connection.\n')
+conn.close;
